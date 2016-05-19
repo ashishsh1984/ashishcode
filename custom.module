@@ -1,0 +1,583 @@
+<?php
+
+/**
+ * @file
+ * Custom module main file.
+ */
+
+ /*function custom_init(){
+
+  $prod = commerce_product_load(40);
+  $title = $prod->title_field['und'][0]['value'];
+  $tid = $prod->field_formats['und'][0]['tid'];
+  $format = get_term($tid);
+ 
+ $nload = node_load(40);
+ $artist_id = $nload->field_artist['und'][0]['target_id'];
+ $artist_name = get_node_title($artist_id);
+ 
+ }*/
+
+/**
+ * Implements hook_menu().
+ */
+ 
+function custom_menu() {
+ 
+  $items['admin/artist/payment/info'] = array(
+    'title' => 'Artist payment Info',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('get_artist_data'),
+    'type' => MENU_NORMAL_ITEM,
+    'access arguments' => array('administer users'),
+  );
+ 
+  $items['artist/download/pdf/%'] = array(
+    'title' => 'Download pdf',
+    'description' => 'Artist Payment Pdf',
+    'page callback' => 'artist_pdf_download',
+    'page arguments' => array(3),
+    'access arguments' => array('administer users'),
+  );
+  return $items;
+}
+
+function get_artist_data($form, $form_state){
+ 
+if(isset($form_state['storage']['by_date'])){
+  $expl = explode("-",$form_state['storage']['by_date']);
+  $month = $expl[1];
+  $year = $expl[0];
+} else{
+
+ $month = date('n');
+ $year  = date('Y');
+}
+ $first = mktime(0,0,0,$month,1,$year);
+ $last = mktime(23,59,00,$month+1,0,$year);
+
+  
+
+
+
+if(isset($form_state['storage']['artist_filter']) && $form_state['storage']['artist_filter'] != "all"){
+  $artist_id = $form_state['storage']['artist_filter'];
+  $extent_sql = "having artist_id= ".$artist_id;
+}else{
+ $extent_sql = "";
+}
+
+ $nids = db_select('node', 'n')
+    ->fields('n', array('nid'))
+    ->fields('n', array('type'))
+    ->condition('n.type', 'artist')
+    ->execute()
+    ->fetchCol(); // returns an indexed array
+
+// Now return the node objects.
+$nodes = node_load_multiple($nids);
+$options['all'] = "All";
+foreach($nodes as $node) {
+    $options[$node->nid] = $node->title;
+  }
+
+
+
+$form['artist_filter'] = array(
+    '#type' => 'select',
+    '#title' => t('Filter By Artist'),
+    '#options' => $options,
+	'#default_value' => isset($form_state['storage']['artist_filter']) ? 
+                                            $form_state['storage']['artist_filter']: '',
+  );
+
+
+$form['by_date'] = array(
+  '#type' => 'date_select', 
+  '#title' => "Filter By Date",
+  '#date_format' => 'm-Y',
+  '#default_value' => date('m Y'),
+);
+
+$form['filter'] = array(
+    '#type' => 'submit',
+    '#value' => t('Filter'),
+  );
+
+ $result = db_query('SELECT * FROM  {artist_info} n WHERE date >= :stdate AND date <= :endate
+           GROUP BY artist_id  ' .$extent_sql.'',array(':stdate' => $first,':endate' => $last));
+  
+  foreach ($result as $record) {
+
+   $sql = db_query('SELECT product_price,product_quantity  FROM  {artist_info} n WHERE artist_id=:aid',array(':aid' => $record->artist_id));
+    $tot_amt = "";
+	foreach ($sql as $pr) {
+      $tot_amt += $pr->product_price*$pr->product_quantity;
+	}
+   //$tot = $sql->fetchObject(); 
+   //$tot_amt = $tot->sum." $";
+   //$art_name = l($record->artist_name,"artist/download/pdf/".$record->artist_id);
+    $art_name = l($record->artist_name,"node/".$record->artist_id);
+	$pdf_detail = l("Download Pdf","artist/download/pdf/".$record->artist_id,array('attributes' => array('target'=>'_blank')));
+   $users = array
+   (
+    array('artist_id' => $record->artist_id, 'date' => date("F,Y",$first), 'artist_name' => $art_name,
+	  'total_amount' => $tot_amt." ".commerce_default_currency(),'status' => $record->status,'details'=>$pdf_detail),
+   );
+ }
+  $header = array
+  (
+    'date' => t('Date'),
+    'artist_name' => t('Artist Name'),
+    'total_amount' => t('Total Amount'),
+	'status' => array('data' => t('Status'), 'field' => 'status','sort' => 'desc'),
+    'details' => t('Details'),
+  );
+  $options = array();
+  if(isset($users[0]['artist_id'])){
+  foreach($users as $user)
+  {
+    $options[$user['artist_id']] =array
+    (
+      'date' => $user['date'],
+      'artist_name' => $user['artist_name'],
+      'total_amount' => $user['total_amount'],
+      'status' => $user['status'],
+      'details' => $user['details'], 
+       
+    );
+  }
+  }
+  $form['table'] = array
+  (
+    '#type' => 'tableselect',
+    '#header' => $header,
+    '#options' => $options,
+    '#empty' => t('No Artist found'),
+    '#attributes' => array(
+      'width' => array(
+        '70%'
+      )),
+  );
+  $form['submit'] = array
+  (
+    '#type' => 'submit',
+    '#value' => t('Send Mail'),
+  );
+  $form['change_status'] = array
+  (
+    '#type' => 'submit',
+    '#value' => t('Change Status to Paid'),
+  );
+  return $form;
+}
+
+
+
+function get_artist_data_submit($form, &$form_state) {
+   if($form_state['clicked_button']['#value'] == "Filter"){
+     $form_state['storage']['artist_filter'] = $form_state['values']['artist_filter'];
+     $form_state['storage']['by_date'] = $form_state['values']['by_date'];
+     $form_state['rebuild'] = TRUE;  
+   }
+   if($form_state['clicked_button']['#value'] == "Change Status to Paid"){
+      foreach($form_state['values']['table'] as $artist_id){
+       $status_updated = db_update('artist_info') // Table name no longer needs {}
+                     ->fields(array(
+                        'status' => "Paid",
+                      ))
+                     ->condition('artist_id', $artist_id, '=')
+                     ->execute();
+       
+	   drupal_set_message("Status Updated Successfully.");
+	  }
+   }
+
+
+   if($form_state['clicked_button']['#value'] == "Send Mail"){
+     //print_r($form_state['values']);
+	 foreach($form_state['values']['table'] as $artist_id){
+       //print $artist_id;
+	    $result = db_query('SELECT 	field_artist_email_value FROM {field_data_field_artist_email} WHERE entity_id = :eid', array(':eid' => $artist_id));
+        $record = $result->fetchObject();  
+		if(isset($record->field_artist_email_value)){
+	     $artistmail = $record->field_artist_email_value; 
+		 /************************************************/
+         $rs = db_query('SELECT artist_name,date FROM {artist_info} WHERE artist_id = :aid', array(':aid' => $artist_id));
+         $rcd = $rs->fetchObject();
+		 $date = date("F,Y",$rcd->date);
+		 $html = "Hello,<br/><br/>";
+		 $html .= "Artist name: ". $rcd->artist_name;
+         $html .= "<br/>";
+         $html .= "Date: ".$date;
+         $html .= "<br/><br/>";
+         //$html .= "Date: ". 
+         $header = array('Name of the artwork', 'Size', 'Quantity sold', 'Percentage or fixed amount','Total due to the artist for this artwork');
+
+  
+         $rs = db_query('SELECT *  FROM  {artist_info} n WHERE artist_id=:aid',array(':aid' => $artist_id)); 
+         $rows = array();
+         $tot_amt = "";
+		 $per = "";
+		 $tot_due = "";
+         foreach ($rs as $row) {
+           $per = "NA";
+		   $tot_due = "NA";
+          $fixed = db_query('SELECT field_fixed_value FROM {field_data_field_fixed} WHERE entity_id = :eid', array(':eid' => $row->product_id))->fetchField();
+          if(isset($fixed) && $fixed !=""){
+           $per = "Fixed: ".$fixed.commerce_default_currency().", base price: ".$row->product_price.commerce_default_currency();
+	       $tot_due = $fixed;
+	       $tot_due = $tot_due." ".commerce_default_currency();
+	      }
+         $perc = db_query('SELECT field_percentage_value FROM {field_data_field_percentage} WHERE entity_id = :eid', array(':eid' => $row->product_id))->fetchField();
+          if(isset($perc) && $perc !=""){
+           $per = "Percentage: ".$perc."%".", base price: ".$row->product_price.commerce_default_currency();
+	       $tot_due = $perc*$row->product_quantity*$row->product_price/100;
+		   $tot_due = $tot_due." ".commerce_default_currency();
+		  }
+
+		   $tot_pr = $row->product_price*$row->product_quantity;
+           $rows[] = array($row->product_title,
+                    $row->product_format,
+                    $row->product_quantity,
+                    $per,
+			        $tot_due,
+            );
+          //$tot_amt += $row->product_price*$row->product_quantity;
+		  if($tot_due != "NA")
+            $tot_amt += $tot_due;
+          
+        }
+        $attributes = array("border"=>1);
+        $html .= theme('table', array('header' => $header,
+                  	         'rows' => $rows,'attributes' => $attributes ));
+        $html .= "<br/><br/>";
+        $html .= "Total Amount : ".$tot_amt." ".commerce_default_currency();
+
+
+        /***************************************************/
+         $tcpdf = tcpdf_get_instance();
+		 $welcome = "Hello,";
+         $tcpdf->DrupalInitialize(array(
+          'footer' => array(
+          'html' => '<em>Sakura</em>',
+         ),
+         'header' => array(
+          'callback' => array(
+            'function' => 'artist_default_header',
+            // You can pass extra data to your callback.
+            'context' => array(
+              'welcome_message' =>$welcome,
+            ),
+          ),
+         ),
+        ));
+
+       $tcpdf->writeHTML($html);
+       $filen = "invoice-".$artist_id.$date.".pdf";
+       $output_dest = 'F';
+	   if (!file_exists('sites/default/files/pdf')) {
+        mkdir('sites/default/files/pdf', 0777, true);
+       }
+       $filename = DRUPAL_ROOT . '/sites/default/files/pdf/'.$filen;
+       $tcpdf->Output($filename, $output_dest);
+
+
+		/***************************************************/
+         $mail_html = $html."<br/><br/>";
+		 $mail_html .= "Thanks<br/>";
+		 $site_name = variable_get('site_name', 'Sakura')." Team";
+		 $mail_html .=  $site_name;
+
+
+         /************************************************/
+		 $attachments = array(
+         'filecontent' => file_get_contents(DRUPAL_ROOT . '/sites/default/files/pdf/'.$filen),
+         'filename' => $filen,
+         'filemime' => 'application/pdf',
+         );
+		 $params = array(
+          'subject' => "Arts Payment Info",
+          'body' => $mail_html,
+          'attachment' => $attachments
+          );
+		  $from = variable_get('system_mail', 'aurelien.dias@boldbeyond.com');
+		  $language = language_default();
+         //cust_mail('default_from', $artistmail, 'Arts Payment Info',  $html);
+		 drupal_mail('custom', 'artist', "ashish.s1984@gmail.com", $language, $params, $from);
+
+         $stat = db_update('artist_info') // Table name no longer needs {}
+                     ->fields(array(
+                        'status' => "Mail Sent",
+                      ))
+                     ->condition('artist_id', $artist_id, '=')
+                     ->execute();
+
+		 drupal_set_message("Mail Sent Sucessfully");
+		 //drupal_mail('custom', 'artist', $artistmail, $language, $params, $from);
+	  }
+	 }
+	 //exit;
+   }
+}
+
+/**
+ * Hook_MAIL
+ *
+ * 
+ */
+
+function custom_mail($key, &$message, $params) {
+  switch ($key) {
+    case 'artist':
+      $message['subject'] = $params['subject'];
+      $message['body'] = $params['body'];
+	  $message['headers']['Content-Type'] = 'text/html; charset=UTF-8; format=flowed';
+	  $message['params']['attachments'][] = $params['attachment'];
+    break;
+    }
+}
+ /*function custom_mail($key, &$message, $params) {
+            $my_module = 'custom';
+            $my_mail_token = microtime();
+
+            $from = variable_get('system_mail', 'aurelien.dias@boldbeyond.com');
+            $message = array(
+                'id' => $my_module . '_' . $my_mail_token,
+                'to' => $to,
+				'from' => $from, // XXX
+                'subject' => $subject,
+                'body' => array($message),
+                'headers' => array(
+					'Content-Type' => 'text/html; charset=UTF-8;', // XXX
+                    'From' => $from,
+                    'Sender' => $from,
+                    'Return-Path' => $from,
+                ),
+            );
+            $system = drupal_mail_system($my_module, $my_mail_token);
+            $message = $system->format($message);
+            if ($system->mail($message)) {
+				drupal_set_message("Mail Sent SSuccessfully");
+                return TRUE;
+            } else {
+                return FALSE;
+            }
+    }*/
+
+/**
+ * Pdf Download Callback
+ *
+ * 
+ */
+function artist_pdf_download($artist_id){
+ $pdf = get_artist_paymentinfo_pdf($artist_id);
+ // Tell the browser that this is not an HTML file to show, but a pdf file to
+  // download.
+  /*header('Content-Type: application/pdf');
+  header('Content-Length: ' . strlen($pdf));
+  header('Content-Disposition: attachment; filename="artist_payment_info.pdf"');*/
+  print $pdf;
+  return NULL;
+
+}
+
+
+
+/**
+ * Generates a pdf file using TCPDF module.
+ *
+ * @return string Binary string of the generated pdf.
+ */
+function get_artist_paymentinfo_pdf($artist_id) {
+  // Get the content we want to convert into pdf.
+  $html = "Here is the Artist Information::<br/><br/>";
+  $result = db_query('SELECT artist_name,date FROM {artist_info} WHERE artist_id = :aid', array(':aid' => $artist_id));
+  $record = $result->fetchObject();  
+  $date = date("F,Y",$record->date);
+  $html .= "Artist name: ". $record->artist_name;
+  $html .= "<br/>";
+  $html .= "Date: ".$date;
+  $html .= "<br/><br/>";
+  //$html .= "Date: ". 
+  $header = array('Name of the artwork', 'Size', 'Quantity sold', 'Percentage or fixed amount','Total due to the artist for this artwork');
+
+  
+  $rs = db_query('SELECT *  FROM  {artist_info} n WHERE artist_id=:aid',array(':aid' => $artist_id)); 
+  $rows = array();
+  $tot_amt = "";
+  $per ="";
+  $tot_due ="";
+  foreach ($rs as $row) {
+    $per ="NA";
+    $tot_due ="NA";
+
+    $fixed = db_query('SELECT field_fixed_value FROM {field_data_field_fixed} WHERE entity_id = :eid', array(':eid' => $row->product_id))->fetchField();
+     if(isset($fixed) && $fixed !=""){
+       $per = "Fixed: ".$fixed.commerce_default_currency().", base price: ".$row->product_price.commerce_default_currency();
+	   $tot_due = $fixed;
+	   $tot_due = $tot_due." ".commerce_default_currency();
+	 }
+    $perc = db_query('SELECT field_percentage_value FROM {field_data_field_percentage} WHERE entity_id = :eid', array(':eid' => $row->product_id))->fetchField();
+      if(isset($perc) && $perc !=""){
+         $per = "Percentage: ".$perc."%".", base price: ".$row->product_price.commerce_default_currency();
+	     $tot_due = $perc*$row->product_quantity*$row->product_price/100;
+		 $tot_due = $tot_due." ".commerce_default_currency();
+		}
+   $tot_pr = $row->product_price*$row->product_quantity;
+   $rows[] = array($row->product_title,
+                    $row->product_format,
+                    $row->product_quantity,
+                    $per,
+	                $tot_due,
+    );
+   //$tot_amt += $row->product_price*$row->product_quantity;
+   if($tot_due != "NA")
+    $tot_amt += $tot_due;
+  }
+  $attributes = array("border"=>1);
+  $html .= theme('table', array('header' => $header,
+                  	         'rows' => $rows,'attributes' => $attributes ));
+  $html .= "<br/><br/>";
+  $html .= "Total Amount Due : ".$tot_amt." ".commerce_default_currency();
+  $pdf = tcpdf_get_instance();
+
+  $pdf->DrupalInitialize(array(
+    'footer' => array(
+      'html' => '<em>Sakura</em>',
+    ),
+    'header' => array(
+      'callback' => array(
+        'function' => 'artist_default_header',
+        // You can pass extra data to your callback.
+        'context' => array(
+          'welcome_message' => 'Hello, Admin!',
+        ),
+      ),
+    ),
+  ));
+  // Insert the content. Note that DrupalInitialize automaticly adds the first
+  // page to the pdf document.
+  $pdf->writeHTML($html);
+
+  return $pdf->Output('', 'I');
+}
+
+/**
+ * Callback for generating the header. This function acts like if it overridded
+ *   the Header() function of tcpdf class except the tcpdf instance is not $this
+ *   but a parameter.
+ *
+ * @param type $tcpdf TCPDFDrupal instance. It can be used as $this in the
+ *   Header() function of a siebling of TCPDF.
+ */
+function artist_default_header(&$pdf, $context) {
+  // $args contains passed variable...
+  $theme_settings = variable_get('theme_' . variable_get('theme_default', '') . '_settings', '');
+  if (isset($theme_settings['logo_path']) && (file_exists($theme_settings['logo_path']))) {
+    $pdf->Image(drupal_realpath($theme_settings['logo_path']), 10, 10, 30, 0, '', variable_get('site_url', ''), '', TRUE, 150, '', FALSE, FALSE, 0, FALSE, FALSE, FALSE);
+  }
+  $pdf->Write(0, $context['welcome_message'], '', 0, 'J', true, 0, false, true, 0);
+}
+
+
+
+/**
+ * Implements hook_commerce_checkout_complete().
+ */
+ function custom_commerce_checkout_complete($order) {
+
+  $bund_arr = array();
+  
+  foreach ($order->commerce_line_items as $line_item) {
+    foreach ($line_item as $key => $item) {
+      $i = commerce_line_item_load($item['line_item_id']);
+      
+      /*
+      $i->quantity;
+      $i->commerce_unit_price[LANGUAGE_NONE][0]['amount'];
+      $i->commerce_unit_price[LANGUAGE_NONE][0]['currency_code'];
+      $i->commerce_product[LANGUAGE_NONE][0]['product_id'];      
+      */
+      switch ($i->type) {
+        case 'product':
+          $billysbilling_product_id =$i->commerce_product[LANGUAGE_NONE][0]['product_id'];
+      
+          if ($billysbilling_product_id === FALSE) {
+            continue;
+          }
+          break;
+        case 'shipping':
+          break;
+      }
+      
+	  if(isset($i->data['context']['entity']['entity_id'])){
+      $bund_arr[] = array(
+        'productId' => $billysbilling_product_id,
+        'quantity' => $i->quantity,
+        // Return unitPrice in float
+        'unitPrice' => $i->commerce_unit_price[LANGUAGE_NONE][0]['amount'] / 100,
+       'nid' => $i->data['context']['entity']['entity_id'],
+      );
+	  }
+    
+    }
+  }
+
+foreach($bund_arr as $key => $val){
+  $prod_id = $val['productId'];
+  $nid = $val['nid'];
+  $quantity = $val['quantity'];
+  $price = $val['unitPrice'];
+
+  $prod = commerce_product_load($prod_id);
+  $title = $prod->title_field['und'][0]['value'];
+  $tid = $prod->field_formats['und'][0]['tid'];
+  $format = get_term($tid);
+ 
+  $nload = node_load($nid);
+  $artist_id = $nload->field_artist['und'][0]['target_id'];
+  $artist_name = get_node_title($artist_id);
+  $date = time();
+  $order_id = $order->order_id;
+
+  $nid = db_insert('artist_info') // Table name no longer needs {}
+->fields(array(
+    'order_id' => $order_id,
+    'artist_id' => $artist_id,
+    'artist_name' => $artist_name,
+	'product_id' => $prod_id,
+	'product_title' => $title,
+	'product_format' => $format,
+	'product_quantity' => $quantity,
+	'product_price' => $price,
+	'date' => REQUEST_TIME,
+	'status' => "No Mail Sent",
+))
+->execute();
+
+}
+
+    //print_r($bund_arr);
+    //exit;
+}
+
+/*************
+@Get term name
+**************/
+function get_term($tid) {
+  return db_select('taxonomy_term_data', 't')
+  ->fields('t', array('name'))
+  ->condition('tid', $tid)
+  ->execute()
+  ->fetchField();
+}
+
+
+/*************
+@Get node title
+**************/
+ 
+ function get_node_title($nid) {
+  return db_query('SELECT title FROM {node} WHERE nid = :nid', array(':nid' => $nid))->fetchField();
+}
